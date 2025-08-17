@@ -30,4 +30,6 @@ COPY --from=builder /app/target/*.jar app.jar
 EXPOSE $PORT
 
 # Render requires listening on 0.0.0.0 and dynamic PORT
-ENTRYPOINT ["java", "-Dserver.port=$PORT", "-jar", "app.jar"]
+# ["java", "-Dserver.port=$PORT", "-jar", "app.jar"]
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
