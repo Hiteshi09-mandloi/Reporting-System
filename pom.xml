@@ -19,11 +19,13 @@
     </properties>
 
     <dependencies>
-        <!-- Spring Boot Starter for Batch - provides all necessary batch libraries and auto-configuration -->
+        <!-- Spring Boot Starter for Batch - DISABLED for Render deployment to avoid DB initialization issues -->
+        <!--
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-batch</artifactId>
         </dependency>
+        -->
 
         <!-- JPA Starter for database interaction -->
         <dependency>
