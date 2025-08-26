@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -95,8 +94,8 @@ public class CsvImportService {
     @Autowired
     private AdReportDataRepository adReportDataRepository;
 
-    private final ExecutorService executorService = Executors.newFixedThreadPool(5); // For main job submission
-    private final ExecutorService chunkSaveExecutor = Executors.newFixedThreadPool(8); // For parallel chunk saves
+    private final ExecutorService executorService = Executors.newFixedThreadPool(2); // Reduced for memory constraints
+    private final ExecutorService chunkSaveExecutor = Executors.newFixedThreadPool(2); // Reduced for memory constraints
 
     private final AtomicLong importJobCounter = new AtomicLong();
     private final ConcurrentHashMap<Long, String> importStatusMap = new ConcurrentHashMap<>();
@@ -191,114 +190,101 @@ public class CsvImportService {
                 return;
             }
 
-            progress.setCurrentPhase("Counting total records...");
-
-            // First pass: count total records
-            long totalRecords = 0;
-            while (csvReader.readNext() != null) {
-                totalRecords++;
-            }
-            progress.setTotalRecords(totalRecords);
             progress.setCurrentPhase("Processing records...");
+            progress.setTotalRecords(0); // Will update dynamically
 
-            // Reset reader for second pass
-            try (BufferedReader reader2 = new BufferedReader(new InputStreamReader(new java.io.ByteArrayInputStream(fileBytes)));
-                 CSVReader csvReader2 = new CSVReader(reader2)) {
+            // Reduced batch size for memory efficiency on free tier
+            final int BATCH_SIZE = 1000;
+            List<Future<?>> saveTasks = new ArrayList<>();
+            List<AdReportData> batch = new ArrayList<>(BATCH_SIZE);
+            long processedRecords = 0;
+            long errorRecords = 0;
 
-                csvReader2.readNext(); // Skip header
+            String[] line;
+            long lineNumber = 1; // Start from 1 (header is line 0)
+            while ((line = csvReader.readNext()) != null) {
+                lineNumber++;
+                try {
+                    AdReportData data = parseCsvLine(line, mappedHeader);
 
-                // Parallel chunk saving setup
-                final int BATCH_SIZE = 5000;
-                List<Future<?>> saveTasks = new ArrayList<>();
-                List<AdReportData> batch = new ArrayList<>(BATCH_SIZE);
-                long processedRecords = 0;
-                long errorRecords = 0;
+                    // Validate that all required key fields are present
+                    validateRequiredFields(data);
 
-                String[] line;
-                long lineNumber = 1; // Start from 1 (header is line 0)
-                while ((line = csvReader2.readNext()) != null) {
-                    lineNumber++;
-                    try {
-                        AdReportData data = parseCsvLine(line, mappedHeader);
-
-                        // Validate that all required key fields are present
-                        validateRequiredFields(data);
-
-                        batch.add(data);
-                        if (batch.size() >= BATCH_SIZE) {
-                            List<AdReportData> chunkToSave = new ArrayList<>(batch);
-                            batch.clear();
-                            saveTasks.add(saveChunkAsync(chunkToSave, jobId));
-                        }
-                        processedRecords++;
-
-                        // Update progress every 1000 records
-                        if (processedRecords % 1000 == 0) {
-                            progress.setProcessedRecords(processedRecords);
-                            progress.updateProgress();
-                        }
-
-                    } catch (Exception e) {
-                        errorRecords++;
-                        String errorMessage = String.format(
-                                "Skipping invalid row on line %d. Data: [%s]. Error: %s",
-                                lineNumber,
-                                String.join(",", line),
-                                e.getMessage()
-                        );
-                        logger.warn("Import job {}: {}", jobId, errorMessage);
-
-                        // Update progress to include error count
-                        progress.setErrorRecords(errorRecords);
-
-                        // Continue processing instead of failing
+                    batch.add(data);
+                    if (batch.size() >= BATCH_SIZE) {
+                        List<AdReportData> chunkToSave = new ArrayList<>(batch);
+                        batch.clear();
+                        saveTasks.add(saveChunkAsync(chunkToSave, jobId));
                     }
-                }
+                    processedRecords++;
 
-                if (!batch.isEmpty()) {
-                    List<AdReportData> chunkToSave = new ArrayList<>(batch);
-                    saveTasks.add(saveChunkAsync(chunkToSave, jobId));
-                }
-
-                progress.setCurrentPhase("Saving to database...");
-                progress.setProcessedRecords(processedRecords);
-                progress.updateProgress();
-
-                // Wait for all save tasks to finish - fail immediately if any task fails
-                int completedTasks = 0;
-                for (Future<?> task : saveTasks) {
-                    try {
-                        task.get(); // Wait synchronously — will throw exception if save failed
-                        completedTasks++;
-                        // Update progress during saving phase (90% base)
-                        if (!saveTasks.isEmpty()) {
-                            // Only update if we have significant progress (every 25% of tasks completed)
-                            if (completedTasks % Math.max(1, saveTasks.size() / 4) == 0 || completedTasks == saveTasks.size()) {
-                                progress.setProgressPercentage(90);
-                            }
-                        }
-                    } catch (Exception e) {
-                        String errorMessage = String.format(
-                                "FAILED: Database save error in async task. Error: %s",
-                                e.getCause() != null ? e.getCause().getMessage() : e.getMessage()
-                        );
-                        logger.error("Import job {}: {}", jobId, errorMessage, e);
-                        failJob(jobId, errorMessage, originalFilename);
-                        return; // Stop processing immediately
+                    // Update progress and total dynamically every 1000 records
+                    if (processedRecords % 1000 == 0) {
+                        progress.setTotalRecords(processedRecords + 1000); // Estimate
+                        progress.setProcessedRecords(processedRecords);
+                        progress.updateProgress();
                     }
+
+                } catch (Exception e) {
+                    errorRecords++;
+                    String errorMessage = String.format(
+                            "Skipping invalid row on line %d. Data: [%s]. Error: %s",
+                            lineNumber,
+                            String.join(",", line),
+                            e.getMessage()
+                    );
+                    logger.warn("Import job {}: {}", jobId, errorMessage);
+
+                    // Update progress to include error count
+                    progress.setErrorRecords(errorRecords);
+
+                    // Continue processing instead of failing
                 }
-
-                progress.setCurrentPhase("Completed");
-                progress.setSavedRecords(processedRecords); // All processed records are saved
-                progress.updateProgress();
-
-                long validRecords = processedRecords;
-                importStatusMap.put(jobId, String.format("COMPLETED: Processed %d valid records, skipped %d invalid rows.",
-                        validRecords, errorRecords));
-                logger.info("Import job {} COMPLETED. Processed {} valid records, skipped {} invalid rows.",
-                        jobId, validRecords, errorRecords);
-
             }
+
+            if (!batch.isEmpty()) {
+                List<AdReportData> chunkToSave = new ArrayList<>(batch);
+                saveTasks.add(saveChunkAsync(chunkToSave, jobId));
+            }
+
+            progress.setCurrentPhase("Saving to database...");
+            progress.setTotalRecords(processedRecords); // Set final total
+            progress.setProcessedRecords(processedRecords);
+            progress.updateProgress();
+
+            // Wait for all save tasks to finish - fail immediately if any task fails
+            int completedTasks = 0;
+            for (Future<?> task : saveTasks) {
+                try {
+                    task.get(); // Wait synchronously — will throw exception if save failed
+                    completedTasks++;
+                    // Update progress during saving phase (90% base)
+                    if (!saveTasks.isEmpty()) {
+                        // Only update if we have significant progress (every 25% of tasks completed)
+                        if (completedTasks % Math.max(1, saveTasks.size() / 4) == 0 || completedTasks == saveTasks.size()) {
+                            progress.setProgressPercentage(90);
+                        }
+                    }
+                } catch (Exception e) {
+                    String errorMessage = String.format(
+                            "FAILED: Database save error in async task. Error: %s",
+                            e.getCause() != null ? e.getCause().getMessage() : e.getMessage()
+                    );
+                    logger.error("Import job {}: {}", jobId, errorMessage, e);
+                    failJob(jobId, errorMessage, originalFilename);
+                    return; // Stop processing immediately
+                }
+            }
+
+            progress.setCurrentPhase("Completed");
+            progress.setSavedRecords(processedRecords); // All processed records are saved
+            progress.updateProgress();
+
+            long validRecords = processedRecords;
+            importStatusMap.put(jobId, String.format("COMPLETED: Processed %d valid records, skipped %d invalid rows.",
+                    validRecords, errorRecords));
+            logger.info("Import job {} COMPLETED. Processed {} valid records, skipped {} invalid rows.",
+                    jobId, validRecords, errorRecords);
 
         } catch (CsvValidationException e) {
             failJob(jobId, "FAILED: CSV format validation error - " + e.getMessage(), originalFilename);
@@ -545,3 +531,8 @@ public class CsvImportService {
         }
     }
 }
+
+
+
+
+

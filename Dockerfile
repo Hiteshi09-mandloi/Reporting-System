@@ -29,7 +29,5 @@ COPY --from=builder /app/target/*.jar app.jar
 # Render uses PORT environment variable (dynamic)
 EXPOSE $PORT
 
-# Render requires listening on 0.0.0.0 and dynamic PORT
-# ["java", "-Dserver.port=$PORT", "-jar", "app.jar"]
-
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# Use shell form with memory optimizations for Render free tier
+ENTRYPOINT java -Xmx400m -Xms200m -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dserver.port=$PORT -jar app.jar

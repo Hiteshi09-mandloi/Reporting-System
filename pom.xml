@@ -48,12 +48,12 @@
 
         <!-- Keep MySQL for other deployments (commented out for Render) -->
         <!--
-         <dependency>
-             <groupId>com.mysql</groupId>
-             <artifactId>mysql-connector-j</artifactId>
-             <scope>runtime</scope>
-         </dependency> -->
-
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        -->
 
         <!-- OpenCSV for parsing CSV files - Note: Spring Batch's FlatFileItemReader can handle this too -->
         <dependency>
@@ -103,8 +103,8 @@
                             <artifactId>lombok</artifactId>
                         </exclude>
                     </excludes>
-                    <!-- IMPORTANT: JVM arguments for increased heap space -->
-                    <jvmArguments>-Xmx2048m -Xms512m</jvmArguments>
+                    <!-- IMPORTANT: JVM arguments optimized for Render free tier (512MB limit) -->
+                    <jvmArguments>-Xmx400m -Xms200m -XX:+UseG1GC -XX:MaxGCPauseMillis=200</jvmArguments>
                 </configuration>
             </plugin>
         </plugins>
