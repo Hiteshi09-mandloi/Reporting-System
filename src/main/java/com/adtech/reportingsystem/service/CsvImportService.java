@@ -172,7 +172,7 @@ public class CsvImportService {
     }
 
     @Async("csvImportTaskExecutor")
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    @Transactional
     protected void processCsvFileAsync(byte[] fileBytes, String originalFilename, long jobId) {
         ImportProgress progress = importProgressMap.get(jobId);
 
