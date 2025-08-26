@@ -69,14 +69,14 @@ public class AdReportController {
     public ResponseEntity<?> getAllFilters(
             @RequestParam(required = true) String startDate,
             @RequestParam(required = true) String endDate) {
-        
+
         // Validate that dates are provided and not empty
         if (startDate == null || startDate.trim().isEmpty() || endDate == null || endDate.trim().isEmpty()) {
             logger.warn("Missing required date parameters: startDate={}, endDate={}", startDate, endDate);
             return ResponseEntity.badRequest()
                     .body("Both startDate and endDate are required parameters. Format: YYYY-MM-DD");
         }
-        
+
         try {
             logger.info("Fetching all filter options with date range: {} to {}", startDate, endDate);
             Map<String, List<String>> filters = reportService.getAllFilters(startDate, endDate);
@@ -96,6 +96,19 @@ public class AdReportController {
             if (progress == null) {
                 return ResponseEntity.notFound().build();
             }
+
+            // Check if job has failed - return error status for client to handle
+            String jobStatus = csvImportService.getImportStatus(jobId);
+            if (jobStatus != null && jobStatus.startsWith("FAILED:")) {
+                // Return HTTP 500 with error details so client can show error and stop polling
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .body(Map.of(
+                                "error", true,
+                                "message", jobStatus,
+                                "progress", progress
+                        ));
+            }
+
             return ResponseEntity.ok(progress);
         } catch (Exception e) {
             logger.error("Error fetching import progress for job {}: {}", jobId, e.getMessage());

@@ -4,18 +4,19 @@ import com.opencsv.exceptions.CsvValidationException;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
-        import java.util.*;
-        import java.util.function.Consumer;
+import java.util.*;
+import java.util.function.Consumer;
 
 @Component
 public class CsvChunkProcessor {
 
     /**
      * Reads a CSV from InputStream and processes it in chunks.
-     * @param csvStream Input CSV stream
-     * @param chunkSize Number of rows per chunk
+     *
+     * @param csvStream     Input CSV stream
+     * @param chunkSize     Number of rows per chunk
      * @param headerHandler Consumer for header mapping
-     * @param chunkHandler Consumer for processing a list of String[] rows
+     * @param chunkHandler  Consumer for processing a list of String[] rows
      */
     public void processInChunks(InputStream csvStream,
                                 int chunkSize,

@@ -17,8 +17,10 @@ import java.time.LocalDate;
         name = "ad_report_data",
         uniqueConstraints = {
                 @UniqueConstraint(
-                    name = "unique_ad_report_record", 
-                    columnNames = {"mobileAppResolvedId", "date", "adUnitId", "inventoryFormatName", "operatingSystemVersionName"}
+                        name = "unique_ad_report_record",
+                        columnNames = {"date", "mobileAppResolvedId", "mobileAppName", "adUnitName", "adUnitId",
+                                "inventoryFormatName", "domain", "operatingSystemVersionName",
+                                "operatingSystemName", "countryName", "countryCriteriaId"}
                 )
         },
         indexes = {
@@ -44,6 +46,9 @@ public class AdReportData {
     private String adUnitId;
     private String inventoryFormatName;
     private String operatingSystemVersionName;
+    private String operatingSystemName;
+    private String countryName;
+    private String countryCriteriaId;
     private LocalDate date;
 
     private Long adExchangeTotalRequests;
@@ -54,6 +59,7 @@ public class AdReportData {
     private Double adExchangeLineItemLevelCtr;
     private Double averageEcpm;
     private Double payout;
+    private Double adExchangeCostPerClick;
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -78,6 +84,15 @@ public class AdReportData {
 
     public String getOperatingSystemVersionName() { return operatingSystemVersionName; }
     public void setOperatingSystemVersionName(String operatingSystemVersionName) { this.operatingSystemVersionName = operatingSystemVersionName; }
+
+    public String getOperatingSystemName() { return operatingSystemName; }
+    public void setOperatingSystemName(String operatingSystemName) { this.operatingSystemName = operatingSystemName; }
+
+    public String getCountryName() { return countryName; }
+    public void setCountryName(String countryName) { this.countryName = countryName; }
+
+    public String getCountryCriteriaId() { return countryCriteriaId; }
+    public void setCountryCriteriaId(String countryCriteriaId) { this.countryCriteriaId = countryCriteriaId; }
 
     public LocalDate getDate() { return date; }
     public void setDate(LocalDate date) { this.date = date; }
@@ -105,4 +120,7 @@ public class AdReportData {
 
     public Double getPayout() { return payout; }
     public void setPayout(Double payout) { this.payout = payout; }
+
+    public Double getAdExchangeCostPerClick() { return adExchangeCostPerClick; }
+    public void setAdExchangeCostPerClick(Double adExchangeCostPerClick) { this.adExchangeCostPerClick = adExchangeCostPerClick; }
 }

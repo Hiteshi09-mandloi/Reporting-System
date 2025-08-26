@@ -98,20 +98,8 @@ public class CsvImportService {
     private final ExecutorService chunkSaveExecutor = Executors.newFixedThreadPool(8); // For parallel chunk saves
 
     private final AtomicLong importJobCounter = new AtomicLong();
-    //importJobCounter → generates unique job IDs.
     private final ConcurrentHashMap<Long, String> importStatusMap = new ConcurrentHashMap<>();
-    //importStatusMap → stores status of each job (IN_PROGRESS, COMPLETED, FAILED).
-    private final ConcurrentHashMap<Long, AtomicLong> duplicateCountMap = new ConcurrentHashMap<>();
-    //To keep track of how many duplicates have been found for each ID/job.
-    //Example:
-    //Job ID = 101, found 5 duplicates → stored as duplicateCountMap.put(101L, new AtomicLong(5));
     private final ConcurrentHashMap<Long, ImportProgress> importProgressMap = new ConcurrentHashMap<>();
-    //To keep track of the progress of each CSV import job.
-    //For example:
-    //
-    //Job ID 101 → 40% completed
-    //
-    //Job ID 102 → 75% complete
 
     private static final Map<String, String> HEADER_MAPPING = new HashMap<>();
 
@@ -123,6 +111,12 @@ public class CsvImportService {
         HEADER_MAPPING.put("Ad Unit ID", "ad_unit_id");
         HEADER_MAPPING.put("Inventory Format", "inventory_format_name");
         HEADER_MAPPING.put("OS Version", "operating_system_version_name");
+        HEADER_MAPPING.put("OS Name", "operating_system_name");
+        HEADER_MAPPING.put("OS", "operating_system_name"); // Additional mapping
+        HEADER_MAPPING.put("Country Name", "country_name");
+        HEADER_MAPPING.put("Country", "country_name"); // Additional mapping
+        HEADER_MAPPING.put("Country Criteria ID", "country_criteria_id");
+        HEADER_MAPPING.put("Country ID", "country_criteria_id"); // Additional mapping
         HEADER_MAPPING.put("Date", "date");
         HEADER_MAPPING.put("Total Requests", "ad_exchange_total_requests");
         HEADER_MAPPING.put("Responses Served", "ad_exchange_responses_served");
@@ -132,60 +126,59 @@ public class CsvImportService {
         HEADER_MAPPING.put("CTR", "ad_exchange_line_item_level_ctr");
         HEADER_MAPPING.put("Average eCPM", "average_ecpm");
         HEADER_MAPPING.put("Payout", "payout");
+        HEADER_MAPPING.put("Cost Per Click", "ad_exchange_cost_per_click");
     }
 
     public Long importCsvData(MultipartFile file) throws IOException {
         long jobId = importJobCounter.incrementAndGet();
         importStatusMap.put(jobId, "IN_PROGRESS");
-        duplicateCountMap.put(jobId, new AtomicLong(0));
-        
+
         // Initialize progress tracking
         ImportProgress progress = new ImportProgress();
-        progress.setCurrentPhase("File uploaded, starting processing...");
+        progress.setCurrentPhase("File uploaded, processing started...");
         importProgressMap.put(jobId, progress);
-        
+
         logger.info("Import job {} initiated. Status: IN_PROGRESS.", jobId);
 
-        byte[] fileBytes = file.getBytes();
+        // IMPORTANT: Move ALL file processing to background thread for immediate response
         String originalFilename = file.getOriginalFilename();
 
-        executorService.submit(() -> processCsvFileAsync(fileBytes, originalFilename, jobId));
-        return jobId;
+        // Submit to background thread immediately - no file reading in main thread
+        executorService.submit(() -> {
+            ImportProgress bgProgress = importProgressMap.get(jobId);
+            try {
+                // Update progress - now reading file in background
+                bgProgress.setCurrentPhase("Reading uploaded file...");
+                bgProgress.updateProgress();
+
+                // Read file bytes in background thread to avoid blocking upload API
+                byte[] fileBytes = file.getBytes();
+
+                // Now start actual CSV processing
+                processCsvFileAsync(fileBytes, originalFilename, jobId);
+            } catch (IOException e) {
+                String errorMessage = "FAILED: Error reading uploaded file - " + e.getMessage();
+                logger.error("Import job {}: {}", jobId, errorMessage, e);
+                failJob(jobId, errorMessage, originalFilename);
+            } catch (Exception e) {
+                String errorMessage = "FAILED: Unexpected error during file processing - " + e.getMessage();
+                logger.error("Import job {}: {}", jobId, errorMessage, e);
+                failJob(jobId, errorMessage, originalFilename);
+            }
+        });
+
+        return jobId; // Return immediately - no waiting for file processing
     }
-    /*
-    * Start async job.
 
-Validate headers.
-
-Count total rows.
-
-Re-read and parse file.
-
-Batch records (5000).
-
-Save batches asynchronously.
-
-Track progress + errors.
-
-Wait for all save tasks.
-
-Mark job completed.
-
-Handle failures gracefully.
-* This method allows you to upload huge CSVs,
-*  process them efficiently in batches,
-* track progress per job, and update users in real-time while handling failures cleanly.
-
-   */
     @Async("csvImportTaskExecutor")
     @Transactional
     protected void processCsvFileAsync(byte[] fileBytes, String originalFilename, long jobId) {
         ImportProgress progress = importProgressMap.get(jobId);
-        
+
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new java.io.ByteArrayInputStream(fileBytes))); CSVReader csvReader = new CSVReader(reader)) {
 
             progress.setCurrentPhase("Reading and validating file headers...");
-            
+
             // Header mapping
             String[] header = csvReader.readNext();
             if (header == null || header.length == 0) {
@@ -198,7 +191,7 @@ Handle failures gracefully.
             }
 
             progress.setCurrentPhase("Counting total records...");
-            
+
             // First pass: count total records
             long totalRecords = 0;
             while (csvReader.readNext() != null) {
@@ -210,9 +203,9 @@ Handle failures gracefully.
             // Reset reader for second pass
             try (BufferedReader reader2 = new BufferedReader(new InputStreamReader(new java.io.ByteArrayInputStream(fileBytes)));
                  CSVReader csvReader2 = new CSVReader(reader2)) {
-                
+
                 csvReader2.readNext(); // Skip header
-                
+
                 // Parallel chunk saving setup
                 final int BATCH_SIZE = 5000;
                 List<Future<?>> saveTasks = new ArrayList<>();
@@ -221,9 +214,15 @@ Handle failures gracefully.
                 long errorRecords = 0;
 
                 String[] line;
+                long lineNumber = 1; // Start from 1 (header is line 0)
                 while ((line = csvReader2.readNext()) != null) {
+                    lineNumber++;
                     try {
                         AdReportData data = parseCsvLine(line, mappedHeader);
+
+                        // Validate that all required key fields are present
+                        validateRequiredFields(data);
+
                         batch.add(data);
                         if (batch.size() >= BATCH_SIZE) {
                             List<AdReportData> chunkToSave = new ArrayList<>(batch);
@@ -231,17 +230,27 @@ Handle failures gracefully.
                             saveTasks.add(saveChunkAsync(chunkToSave, jobId));
                         }
                         processedRecords++;
-                        
+
                         // Update progress every 1000 records
                         if (processedRecords % 1000 == 0) {
                             progress.setProcessedRecords(processedRecords);
                             progress.updateProgress();
                         }
-                        
+
                     } catch (Exception e) {
-                        logger.error("Import job {}: Error parsing CSV line: {} - {}", jobId, String.join(",", line), e.getMessage(), e);
                         errorRecords++;
+                        String errorMessage = String.format(
+                                "Skipping invalid row on line %d. Data: [%s]. Error: %s",
+                                lineNumber,
+                                String.join(",", line),
+                                e.getMessage()
+                        );
+                        logger.warn("Import job {}: {}", jobId, errorMessage);
+
+                        // Update progress to include error count
                         progress.setErrorRecords(errorRecords);
+
+                        // Continue processing instead of failing
                     }
                 }
 
@@ -254,31 +263,40 @@ Handle failures gracefully.
                 progress.setProcessedRecords(processedRecords);
                 progress.updateProgress();
 
-                // Wait for all save tasks to finish
+                // Wait for all save tasks to finish - fail immediately if any task fails
                 int completedTasks = 0;
                 for (Future<?> task : saveTasks) {
-                    task.get(); // Wait synchronously — avoids marking job complete before all saves are done
-                    completedTasks++;
-                    // Update progress during saving phase (90% base)
-                    if (!saveTasks.isEmpty()) {
-                        // Only update if we have significant progress (every 25% of tasks completed)
-                        if (completedTasks % Math.max(1, saveTasks.size() / 4) == 0 || completedTasks == saveTasks.size()) {
-                            progress.setProgressPercentage(90);
+                    try {
+                        task.get(); // Wait synchronously — will throw exception if save failed
+                        completedTasks++;
+                        // Update progress during saving phase (90% base)
+                        if (!saveTasks.isEmpty()) {
+                            // Only update if we have significant progress (every 25% of tasks completed)
+                            if (completedTasks % Math.max(1, saveTasks.size() / 4) == 0 || completedTasks == saveTasks.size()) {
+                                progress.setProgressPercentage(90);
+                            }
                         }
+                    } catch (Exception e) {
+                        String errorMessage = String.format(
+                                "FAILED: Database save error in async task. Error: %s",
+                                e.getCause() != null ? e.getCause().getMessage() : e.getMessage()
+                        );
+                        logger.error("Import job {}: {}", jobId, errorMessage, e);
+                        failJob(jobId, errorMessage, originalFilename);
+                        return; // Stop processing immediately
                     }
                 }
 
                 progress.setCurrentPhase("Completed");
-                progress.setSavedRecords(processedRecords - errorRecords);
+                progress.setSavedRecords(processedRecords); // All processed records are saved
                 progress.updateProgress();
 
-                importStatusMap.put(jobId, String.format("COMPLETED: Processed %d records, %d errors.",
-                        processedRecords, errorRecords));
-                logger.info("Import job {} COMPLETED. Processed {} records, {} errors.",
-                        jobId, processedRecords, errorRecords);
+                long validRecords = processedRecords;
+                importStatusMap.put(jobId, String.format("COMPLETED: Processed %d valid records, skipped %d invalid rows.",
+                        validRecords, errorRecords));
+                logger.info("Import job {} COMPLETED. Processed {} valid records, skipped {} invalid rows.",
+                        jobId, validRecords, errorRecords);
 
-                // Clean up duplicate counter
-                duplicateCountMap.remove(jobId);
             }
 
         } catch (CsvValidationException e) {
@@ -289,61 +307,49 @@ Handle failures gracefully.
             failJob(jobId, "FAILED: An unexpected error occurred - " + e.getMessage(), originalFilename);
         }
     }
-    /* This method is responsible for saving a batch (chunk) of parsed CSV records into the database asynchronously.
-It is called from your CSV processing method whenever a batch of records (e.g., 5000 at a time) is ready.*/
 
     private Future<?> saveChunkAsync(List<AdReportData> chunk, long jobId) {
         return chunkSaveExecutor.submit(() -> {
             try {
-                // Use saveAll with handling duplicate exceptions
-                adReportDataRepository.saveAll(chunk);
-                logger.debug("Import job {}: Saved a chunk of {} records.", jobId, chunk.size());
-            } catch (org.springframework.dao.DataIntegrityViolationException e) {
-                // Handle duplicates by saving one by one and catching individual conflicts
-                logger.debug("Import job {}: Handling duplicates in chunk of {} records.", jobId, chunk.size());
-                for (AdReportData record : chunk) {
-                    try {
-                        adReportDataRepository.save(record);
-                    } catch (org.springframework.dao.DataIntegrityViolationException dupEx) {
-                        // Find and update existing record
-                        Optional<AdReportData> existing = adReportDataRepository
-                                .findByMobileAppResolvedIdAndDateAndAdUnitIdAndInventoryFormatNameAndOperatingSystemVersionName(
-                                        record.getMobileAppResolvedId(),
-                                        record.getDate(),
-                                        record.getAdUnitId(),
-                                        record.getInventoryFormatName(),
-                                        record.getOperatingSystemVersionName()
-                                );
-                        if (existing.isPresent()) {
-                            updateExistingRecord(existing.get(), record);
-                            adReportDataRepository.save(existing.get());
-                            logger.debug("Import job {}: Updated duplicate record for App: {}, Date: {}",
-                                    jobId, record.getMobileAppResolvedId(), record.getDate());
-                        }
-                    }
+                // Use UPSERT for each record to handle duplicates by updating them
+                for (AdReportData data : chunk) {
+                    adReportDataRepository.upsertRecord(
+                            data.getMobileAppResolvedId(),
+                            data.getMobileAppName(),
+                            data.getDomain(),
+                            data.getAdUnitName(),
+                            data.getAdUnitId(),
+                            data.getInventoryFormatName(),
+                            data.getOperatingSystemVersionName(),
+                            data.getOperatingSystemName(),
+                            data.getCountryName(),
+                            data.getCountryCriteriaId(),
+                            data.getDate(),
+                            data.getAdExchangeTotalRequests(),
+                            data.getAdExchangeResponsesServed(),
+                            data.getAdExchangeMatchRate(),
+                            data.getAdExchangeLineItemLevelImpressions(),
+                            data.getAdExchangeLineItemLevelClicks(),
+                            data.getAdExchangeLineItemLevelCtr(),
+                            data.getAverageEcpm(),
+                            data.getPayout(),
+                            data.getAdExchangeCostPerClick()
+                    );
                 }
+                logger.debug("Import job {}: UPSERTED a chunk of {} records.", jobId, chunk.size());
             } catch (Exception e) {
-                logger.error("Import job {}: Error saving chunk - {}", jobId, e.getMessage(), e);
-                throw e;
+                String errorDetails = String.format(
+                        "Database error while upserting chunk of %d records. Error: %s",
+                        chunk.size(),
+                        e.getMessage()
+                );
+                logger.error("Import job {}: {}", jobId, errorDetails, e);
+                throw new RuntimeException(errorDetails, e);
             }
         });
     }
 
-    private void updateExistingRecord(AdReportData existing, AdReportData newRecord)
-    {
-        // Update all non-key fields with new data (upsert behavior)
-        existing.setMobileAppName(newRecord.getMobileAppName());
-        existing.setDomain(newRecord.getDomain());
-        existing.setAdUnitName(newRecord.getAdUnitName());
-        existing.setAdExchangeTotalRequests(newRecord.getAdExchangeTotalRequests());
-        existing.setAdExchangeResponsesServed(newRecord.getAdExchangeResponsesServed());
-        existing.setAdExchangeMatchRate(newRecord.getAdExchangeMatchRate());
-        existing.setAdExchangeLineItemLevelImpressions(newRecord.getAdExchangeLineItemLevelImpressions());
-        existing.setAdExchangeLineItemLevelClicks(newRecord.getAdExchangeLineItemLevelClicks());
-        existing.setAdExchangeLineItemLevelCtr(newRecord.getAdExchangeLineItemLevelCtr());
-        existing.setAverageEcpm(newRecord.getAverageEcpm());
-        existing.setPayout(newRecord.getPayout());
-    }
+
 
     private void failJob(long jobId, String message, String filename) {
         importStatusMap.put(jobId, message);
@@ -359,8 +365,8 @@ It is called from your CSV processing method whenever a batch of records (e.g., 
     }
 
     private static final DateTimeFormatter[] DATE_FORMATS = {
-        DateTimeFormatter.ofPattern("dd-MM-yyyy"),
-        DateTimeFormatter.ISO_LOCAL_DATE
+            DateTimeFormatter.ofPattern("dd-MM-yyyy"),
+            DateTimeFormatter.ISO_LOCAL_DATE
     };
 
     private String[] mapHeaders(String[] header) {
@@ -373,17 +379,74 @@ It is called from your CSV processing method whenever a batch of records (e.g., 
     }
 
     private boolean validateHeaders(String[] mappedHeader, long jobId, String filename) {
-        List<String> expectedHeaders = List.of(
-                "mobile_app_resolved_id", "mobile_app_name", "domain", "ad_unit_name", "ad_unit_id",
-                "inventory_format_name", "operating_system_version_name", "date", "ad_exchange_total_requests",
-                "ad_exchange_responses_served", "ad_exchange_match_rate", "ad_exchange_line_item_level_impressions",
-                "ad_exchange_line_item_level_clicks", "ad_exchange_line_item_level_ctr", "average_ecpm", "payout"
+        // All 11 dimensions are mandatory for proper duplicate detection
+        List<String> requiredDimensions = List.of(
+                "date", "mobile_app_resolved_id", "mobile_app_name", "ad_unit_name", "ad_unit_id",
+                "inventory_format_name", "domain", "operating_system_version_name",
+                "operating_system_name", "country_name", "country_criteria_id"
         );
-        if (!List.of(mappedHeader).containsAll(expectedHeaders)) {
-            failJob(jobId, "FAILED: CSV header mismatch. Expected: " + expectedHeaders, filename);
+
+        List<String> headerList = List.of(mappedHeader);
+        List<String> missingHeaders = new ArrayList<>();
+
+        for (String required : requiredDimensions) {
+            if (!headerList.contains(required)) {
+                missingHeaders.add(required);
+            }
+        }
+
+        if (!missingHeaders.isEmpty()) {
+            failJob(jobId, "FAILED: Missing required dimension columns in CSV header: " + missingHeaders +
+                    ". All 11 dimensions are mandatory.", filename);
             return false;
         }
         return true;
+    }
+
+    private void validateRequiredFields(AdReportData data) {
+        List<String> missingFields = new ArrayList<>();
+
+        // Validate ALL 11 dimension fields - all are mandatory
+        if (data.getMobileAppResolvedId() == null || data.getMobileAppResolvedId().trim().isEmpty()) {
+            missingFields.add("mobile_app_resolved_id (App ID)");
+        }
+        if (data.getMobileAppName() == null || data.getMobileAppName().trim().isEmpty()) {
+            missingFields.add("mobile_app_name (App Name)");
+        }
+        if (data.getDomain() == null || data.getDomain().trim().isEmpty()) {
+            missingFields.add("domain (Domain)");
+        }
+        if (data.getAdUnitName() == null || data.getAdUnitName().trim().isEmpty()) {
+            missingFields.add("ad_unit_name (Ad Unit)");
+        }
+        if (data.getAdUnitId() == null || data.getAdUnitId().trim().isEmpty()) {
+            missingFields.add("ad_unit_id (Ad Unit ID)");
+        }
+        if (data.getInventoryFormatName() == null || data.getInventoryFormatName().trim().isEmpty()) {
+            missingFields.add("inventory_format_name (Inventory Format)");
+        }
+        if (data.getOperatingSystemVersionName() == null || data.getOperatingSystemVersionName().trim().isEmpty()) {
+            missingFields.add("operating_system_version_name (OS Version)");
+        }
+        if (data.getOperatingSystemName() == null || data.getOperatingSystemName().trim().isEmpty()) {
+            missingFields.add("operating_system_name (OS Name)");
+        }
+        if (data.getCountryName() == null || data.getCountryName().trim().isEmpty()) {
+            missingFields.add("country_name (Country Name)");
+        }
+        if (data.getCountryCriteriaId() == null || data.getCountryCriteriaId().trim().isEmpty()) {
+            missingFields.add("country_criteria_id (Country Criteria ID)");
+        }
+        if (data.getDate() == null) {
+            missingFields.add("date");
+        }
+
+        if (!missingFields.isEmpty()) {
+            throw new IllegalArgumentException(
+                    String.format("Missing required dimension fields: %s. All 11 dimensions are mandatory for proper duplicate detection.",
+                            String.join(", ", missingFields))
+            );
+        }
     }
 
     private LocalDate parseFlexibleDate(String value) {
@@ -409,42 +472,54 @@ It is called from your CSV processing method whenever a batch of records (e.g., 
             try {
                 switch (colName) {
                     case "mobile_app_resolved_id" ->
-                        data.setMobileAppResolvedId(value);
+                            data.setMobileAppResolvedId(value);
                     case "mobile_app_name" ->
-                        data.setMobileAppName(value);
+                            data.setMobileAppName(value);
                     case "domain" ->
-                        data.setDomain(value);
+                            data.setDomain(value);
                     case "ad_unit_name" ->
-                        data.setAdUnitName(value);
+                            data.setAdUnitName(value);
                     case "ad_unit_id" ->
-                        data.setAdUnitId(value);
+                            data.setAdUnitId(value);
                     case "inventory_format_name" ->
-                        data.setInventoryFormatName(value);
+                            data.setInventoryFormatName(value);
                     case "operating_system_version_name" ->
-                        data.setOperatingSystemVersionName(value);
+                            data.setOperatingSystemVersionName(value);
+                    case "operating_system_name" ->
+                            data.setOperatingSystemName(value);
+                    case "country_name" ->
+                            data.setCountryName(value);
+                    case "country_criteria_id" ->
+                            data.setCountryCriteriaId(value);
                     case "date" ->
-                        data.setDate(parseFlexibleDate(value));
+                            data.setDate(parseFlexibleDate(value));
                     case "ad_exchange_total_requests" ->
-                        data.setAdExchangeTotalRequests(Long.valueOf(value));
+                            data.setAdExchangeTotalRequests(Long.valueOf(value));
                     case "ad_exchange_responses_served" ->
-                        data.setAdExchangeResponsesServed(Long.valueOf(value));
+                            data.setAdExchangeResponsesServed(Long.valueOf(value));
                     case "ad_exchange_match_rate" ->
-                        data.setAdExchangeMatchRate(Double.valueOf(value));
+                            data.setAdExchangeMatchRate(Double.valueOf(value));
                     case "ad_exchange_line_item_level_impressions" ->
-                        data.setAdExchangeLineItemLevelImpressions(Long.valueOf(value));
+                            data.setAdExchangeLineItemLevelImpressions(Long.valueOf(value));
                     case "ad_exchange_line_item_level_clicks" ->
-                        data.setAdExchangeLineItemLevelClicks(Long.valueOf(value));
+                            data.setAdExchangeLineItemLevelClicks(Long.valueOf(value));
                     case "ad_exchange_line_item_level_ctr" ->
-                        data.setAdExchangeLineItemLevelCtr(Double.valueOf(value));
+                            data.setAdExchangeLineItemLevelCtr(Double.valueOf(value));
                     case "average_ecpm" ->
-                        data.setAverageEcpm(Double.valueOf(value));
+                            data.setAverageEcpm(Double.valueOf(value));
                     case "payout" ->
-                        data.setPayout(Double.valueOf(value));
+                            data.setPayout(Double.valueOf(value));
+                    case "ad_exchange_cost_per_click" ->
+                            data.setAdExchangeCostPerClick(Double.valueOf(value));
                     default ->
-                        logger.warn("Unexpected column '{}' with value '{}'.", colName, value);
+                            logger.warn("Unexpected column '{}' with value '{}'.", colName, value);
                 }
-            } catch (NumberFormatException | DateTimeParseException e) {
-                throw new IllegalArgumentException("Data type mismatch for column '" + colName + "' with value '" + value + "'", e);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid number format for column '" + colName + "' with value '" + value + "'. Expected a valid number.", e);
+            } catch (DateTimeParseException e) {
+                throw new IllegalArgumentException("Invalid date format for column '" + colName + "' with value '" + value + "'. Expected format: YYYY-MM-DD, MM/dd/yyyy, or dd/MM/yyyy.", e);
+            } catch (Exception e) {
+                throw new IllegalArgumentException("Error processing column '" + colName + "' with value '" + value + "': " + e.getMessage(), e);
             }
         }
         return data;
@@ -462,12 +537,10 @@ It is called from your CSV processing method whenever a batch of records (e.g., 
             if (!chunkSaveExecutor.awaitTermination(60, TimeUnit.SECONDS)) {
                 chunkSaveExecutor.shutdownNow();
             }
-        } catch (InterruptedException e)
-        {
+        } catch (InterruptedException e) {
             executorService.shutdownNow();
             chunkSaveExecutor.shutdownNow();
             Thread.currentThread().interrupt();
         }
     }
 }
-

@@ -49,12 +49,12 @@ public class ReportService {
     public Map<String, List<String>> getAllFilters(String startDateStr, String endDateStr) {
         LocalDate startDate = LocalDate.parse(startDateStr);
         LocalDate endDate = LocalDate.parse(endDateStr);
-        
+
         // Validate date range
         if (startDate.isAfter(endDate)) {
             throw new IllegalArgumentException("startDate cannot be after endDate");
         }
-        
+
         logger.debug("Fetching all filters for date range: {} to {} using single optimized query", startDate, endDate);
         return extractAllFiltersFromSingleQuery(adReportDataRepository.findAllDistinctFiltersByDateRange(startDate, endDate));
     }
@@ -68,7 +68,7 @@ public class ReportService {
         Set<String> adUnitIds = new LinkedHashSet<>();
         Set<String> inventoryFormatNames = new LinkedHashSet<>();
         Set<String> operatingSystemVersionNames = new LinkedHashSet<>();
-        
+
         // Extract all dimensions from single query result
         // Query returns: mobileAppResolvedId, mobileAppName, domain, adUnitName, adUnitId, inventoryFormatName, operatingSystemVersionName
         for (Object[] row : queryResults) {
@@ -80,7 +80,7 @@ public class ReportService {
             if (row[5] != null) inventoryFormatNames.add((String) row[5]);
             if (row[6] != null) operatingSystemVersionNames.add((String) row[6]);
         }
-        
+
         // Build comprehensive filter response
         Map<String, List<String>> filters = new HashMap<>();
         filters.put("mobileAppResolvedIds", new ArrayList<>(mobileAppResolvedIds));
@@ -90,11 +90,11 @@ public class ReportService {
         filters.put("adUnitIds", new ArrayList<>(adUnitIds));
         filters.put("inventoryFormatNames", new ArrayList<>(inventoryFormatNames));
         filters.put("operatingSystemVersionNames", new ArrayList<>(operatingSystemVersionNames));
-        
-        logger.debug("Extracted from single query: {} app IDs, {} app names, {} domains, {} ad unit names, {} ad unit IDs, {} inventory formats, {} OS versions", 
-                    mobileAppResolvedIds.size(), mobileAppNames.size(), domains.size(), 
-                    adUnitNames.size(), adUnitIds.size(), inventoryFormatNames.size(), operatingSystemVersionNames.size());
-        
+
+        logger.debug("Extracted from single query: {} app IDs, {} app names, {} domains, {} ad unit names, {} ad unit IDs, {} inventory formats, {} OS versions",
+                mobileAppResolvedIds.size(), mobileAppNames.size(), domains.size(),
+                adUnitNames.size(), adUnitIds.size(), inventoryFormatNames.size(), operatingSystemVersionNames.size());
+
         return filters;
     }
 
@@ -102,8 +102,8 @@ public class ReportService {
         logger.debug("Fetching report data with request: {}", request);
 
         // If no dimensions and metrics specified, return all table data
-        if ((request.getGroupByDimensions() == null || request.getGroupByDimensions().isEmpty()) && 
-            (request.getMetrics() == null || request.getMetrics().isEmpty())) {
+        if ((request.getGroupByDimensions() == null || request.getGroupByDimensions().isEmpty()) &&
+                (request.getMetrics() == null || request.getMetrics().isEmpty())) {
             return getAllTableData(request);
         }
 
@@ -137,14 +137,14 @@ public class ReportService {
         cq.multiselect(selections.toArray(new Selection[0]));
 
         TypedQuery<Tuple> typedQuery = entityManager.createQuery(cq);
-        
+
         if (request.getOffset() != null && request.getOffset() > 0) {
             typedQuery.setFirstResult(request.getOffset());
         }
         if (request.getLimit() != null && request.getLimit() > 0) {
             typedQuery.setMaxResults(request.getLimit());
         }
-        
+
         List<Tuple> results = typedQuery.getResultList();
 
         List<Map<String, Object>> mappedResults = new ArrayList<>();
@@ -181,6 +181,12 @@ public class ReportService {
                 return "inventoryFormatName";
             case "operating_system_version_name":
                 return "operatingSystemVersionName";
+            case "operating_system_name":
+                return "operatingSystemName";
+            case "country_name":
+                return "countryName";
+            case "country_criteria_id":
+                return "countryCriteriaId";
             case "date":
                 return "date";
             case "ad_exchange_total_requests":
@@ -204,7 +210,7 @@ public class ReportService {
         }
     }
 
-    private List<Map<String, Object>>  getAllTableData(ReportRequest request) {
+    private List<Map<String, Object>> getAllTableData(ReportRequest request) {
         logger.debug("Fetching all table data with filters");
 
         Specification<AdReportData> spec = (root, query, criteriaBuilder) -> {
@@ -230,6 +236,9 @@ public class ReportService {
             row.put("ad_unit_id", item.getAdUnitId());
             row.put("inventory_format_name", item.getInventoryFormatName());
             row.put("operating_system_version_name", item.getOperatingSystemVersionName());
+            row.put("operating_system_name", item.getOperatingSystemName());
+            row.put("country_name", item.getCountryName());
+            row.put("country_criteria_id", item.getCountryCriteriaId());
             row.put("date", item.getDate() != null ? item.getDate().format(DateTimeFormatter.ISO_LOCAL_DATE) : null);
             row.put("ad_exchange_total_requests", item.getAdExchangeTotalRequests());
             row.put("ad_exchange_responses_served", item.getAdExchangeResponsesServed());
@@ -259,7 +268,7 @@ public class ReportService {
         }
 
         List<Selection<?>> selections = new ArrayList<>();
-        
+
         selections.add(cb.sum(root.get("adExchangeTotalRequests")).alias("total_requests"));
         selections.add(cb.sum(root.get("adExchangeLineItemLevelImpressions")).alias("total_impressions"));
         selections.add(cb.sum(root.get("adExchangeLineItemLevelClicks")).alias("total_clicks"));
